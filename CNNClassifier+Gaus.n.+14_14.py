@@ -1,8 +1,9 @@
+import sys
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Dataset
 import torchvision
 import torchvision.transforms as transforms
 from torchvision.datasets import ImageFolder
@@ -13,10 +14,11 @@ from PIL import Image
 import json
 from datetime import datetime
 
-class CNNClassifier(nn.Module):
+class CNNClassifier(nn.Module): #Сверточная нейронная сеть
     def __init__(self, num_classes=10, dropout_rate=0.5):
         super(CNNClassifier, self).__init__()
 
+        #Сверточные слои с пакетной нормализацией
         self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(32)
         self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
@@ -24,17 +26,20 @@ class CNNClassifier(nn.Module):
         self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
         self.bn3 = nn.BatchNorm2d(128)
 
-        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        #Адаптивный пулинг для гибкого размера входа
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((4, 4))
 
-        self.fc1 = nn.Linear(128, 256)
+        #Полносвязные слои с dropout для неопределенности
+        self.fc1 = nn.Linear(128 * 4 * 4, 256)
         self.dropout1 = nn.Dropout(dropout_rate)
         self.fc2 = nn.Linear(256, 128)
         self.dropout2 = nn.Dropout(dropout_rate)
         self.fc3 = nn.Linear(128, num_classes)
 
+        #Инициализация весов
         self._initialize_weights()
 
-    def _initialize_weights(self):
+    def _initialize_weights(self): #Инициализация Ксавье для лучшей сходимости
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.xavier_uniform_(m.weight)
@@ -45,6 +50,7 @@ class CNNClassifier(nn.Module):
                 nn.init.zeros_(m.bias)
 
     def forward(self, x):
+        #Прямой проход
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.max_pool2d(x, 2)
 
@@ -54,9 +60,15 @@ class CNNClassifier(nn.Module):
         x = F.relu(self.bn3(self.conv3(x)))
         x = F.max_pool2d(x, 2)
 
-        x = self.global_avg_pool(x)
+        if x.device.type == 'mps':
+            #Для MPS используем ручное изменение размера
+            x = F.adaptive_avg_pool2d(x.cpu(), (4, 4)).to(x.device)
+        else:
+            x = self.adaptive_pool(x)
+
         x = x.view(x.size(0), -1)
 
+        # Classification head
         x = F.relu(self.fc1(x))
         x = self.dropout1(x)
         x = F.relu(self.fc2(x))
@@ -65,7 +77,8 @@ class CNNClassifier(nn.Module):
 
         return x
 
-    def predict_with_uncertainty(self, x, num_samples=100):
+    def predict_with_uncertainty(self, x, num_samples=100): #Monte Carlo Dropout для оценки неопределенности
+
         self.train()
         predictions = []
 
@@ -81,7 +94,7 @@ class CNNClassifier(nn.Module):
         return mean_pred, uncertainty
 
 
-class UncertaintyDataset(Dataset):
+class UncertaintyDataset(Dataset): #Датасет для хранения изображений с неопределенностью
     def __init__(self, images, labels, uncertainties, transform=None):
         self.images = images
         self.labels = labels
@@ -102,7 +115,7 @@ class UncertaintyDataset(Dataset):
         return image, label, uncertainty
 
 
-class HITLTrainingSystem:
+class HITLTrainingSystem: #Система обучения нейронной сети с участием человека
     def __init__(self, model, device, uncertainty_dir="uncertain_samples",
                  uncertainty_threshold=0.3, confidence_threshold=0.7):
         self.model = model
@@ -111,10 +124,12 @@ class HITLTrainingSystem:
         self.uncertainty_threshold = uncertainty_threshold
         self.confidence_threshold = confidence_threshold
 
+        #Создание директорий
         os.makedirs(uncertainty_dir, exist_ok=True)
         for i in range(10):  # Для цифр 0-9
             os.makedirs(f"{uncertainty_dir}/digit_{i}", exist_ok=True)
 
+        #Метрики обучения
         self.training_history = {
             'initial_accuracy': 0,
             'current_accuracy': 0,
@@ -124,9 +139,10 @@ class HITLTrainingSystem:
             'human_feedback_accuracies': []
         }
 
+        #Логирование
         self.log_file = f"training_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
 
-    def train_initial_model(self, train_loader, val_loader, epochs=10):
+    def train_initial_model(self, train_loader, val_loader, epochs=10): #Первоначальное обучение модели
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(self.model.parameters(), lr=0.001, weight_decay=1e-4)
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
@@ -176,7 +192,7 @@ class HITLTrainingSystem:
 
         return best_accuracy
 
-    def evaluate_model(self, test_loader):
+    def evaluate_model(self, test_loader): #Оценка модели на тестовых данных
         self.model.eval()
         correct = 0
         total = 0
@@ -192,7 +208,7 @@ class HITLTrainingSystem:
         accuracy = 100 * correct / total
         return accuracy
 
-    def find_uncertain_samples(self, data_loader, num_samples=50):
+    def find_uncertain_samples(self, data_loader, num_samples=50): #Поиск неопределенных образцов с использованием Monte Carlo Dropout
         uncertain_samples = []
         self.model.eval()
 
@@ -237,24 +253,27 @@ class HITLTrainingSystem:
         print(f"Найдено {len(uncertain_samples)} неопределенных образцов")
         return uncertain_samples
 
-    def save_uncertain_samples(self, uncertain_samples):
+    def save_uncertain_samples(self, uncertain_samples): #Сохранение неопределенных образцов в папки
         for idx, sample in enumerate(uncertain_samples):
             image = sample['image']
             true_label = sample['true_label']
             predictions = sample['predictions']
 
+            #Преобразование тензора в изображение
             img_np = image.squeeze().numpy()
             img_pil = Image.fromarray((img_np * 255).astype(np.uint8))
 
+            #Сохранение в папку наиболее вероятного класса
             predicted_label = predictions[0][0]
             filename = f"uncertain_{idx}_true_{true_label}_pred_{predicted_label}.png"
             filepath = os.path.join(self.uncertainty_dir, f"digit_{predicted_label}", filename)
 
             img_pil.save(filepath)
 
+            #Сохранение метаданных с правильным преобразованием типов
             metadata = {
-                'true_label': int(true_label),  # Преобразование в Python int
-                'predictions': [[int(pred[0]), float(pred[1])] for pred in predictions],  # Преобразование типов
+                'true_label': int(true_label),  #Преобразование в Python int
+                'predictions': [[int(pred[0]), float(pred[1])] for pred in predictions],  #Преобразование типов
                 'entropy': float(sample['entropy']),
                 'max_confidence': float(sample['max_confidence'])
             }
@@ -263,7 +282,7 @@ class HITLTrainingSystem:
             with open(metadata_path, 'w') as f:
                 json.dump(metadata, f, indent=2)
 
-    def human_feedback_session(self, uncertain_samples):
+    def human_feedback_session(self, uncertain_samples): #Сессия получения обратной связи от человека
         corrected_samples = []
         print("Начало сессии обратной связи")
 
@@ -272,20 +291,25 @@ class HITLTrainingSystem:
             for idx, sample in enumerate(uncertain_samples):
                 image = sample['image'].to(self.device).unsqueeze(0)
 
+                #Получаем вероятности предсказания
                 outputs = torch.stack([self.model(image) for _ in range(10)])
-                probs = F.softmax(outputs, dim=2).mean(dim=0).squeeze()
+                probs = F.softmax(outputs, dim=2).mean(dim=0).squeeze()  #Средняя вероятность
 
+                #Топ 3 предположения
                 top_probs, top_indices = torch.topk(probs, k=3)
 
+                # Вывод возможных варианты
+                print("Возможные цифры модели:")
+                for i in range(3):
+                    print(f"{i + 1}. Цифра {top_indices[i].item()} — вероятность {top_probs[i].item():.2%}")
+
+                #Отображение изображений
                 plt.imshow(sample['image'].squeeze().cpu().numpy(), cmap='gray')
                 plt.title(f"Неуверенное предсказание ({idx + 1}/{len(uncertain_samples)})")
                 plt.axis('off')
                 plt.show()
 
-                print("Возможные цифры модели:")
-                for i in range(3):
-                    print(f"{i + 1}. Цифра {top_indices[i].item()} — вероятность {top_probs[i].item():.2%}")
-
+                # Получение метки от пользователя
                 while True:
                     user_input = input("Введите правильную цифру (0–9), или 's' чтобы пропустить: ")
                     if user_input.lower() == 's':
@@ -307,27 +331,32 @@ class HITLTrainingSystem:
         print(f"Получено корректировок: {len(corrected_samples)}")
         return corrected_samples
 
-    def retrain_with_feedback(self, train_loader, corrected_samples, epochs=5):
+    def retrain_with_feedback(self, train_loader, corrected_samples, epochs=5): #Дообучение модели с использованием обратной связи
         print("Дообучение модели с обратной связью...")
 
+        #Создание нового датасета с корректировками
         corrected_images = [sample['image'] for sample in corrected_samples]
         corrected_labels = [sample['corrected_label'] for sample in corrected_samples]
 
+        #Преобразование в тензоры
         corrected_images_tensor = torch.stack(corrected_images)
         corrected_labels_tensor = torch.tensor(corrected_labels, dtype=torch.long)
 
+        #Создание DataLoader для корректированных данных
         corrected_dataset = torch.utils.data.TensorDataset(
             corrected_images_tensor, corrected_labels_tensor
         )
         corrected_loader = DataLoader(corrected_dataset, batch_size=32, shuffle=True)
 
+        #Дообучение
         criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(self.model.parameters(), lr=0.0001)
+        optimizer = optim.Adam(self.model.parameters(), lr=0.0001)  #Меньший learning rate
 
         self.model.train()
         for epoch in range(epochs):
             total_loss = 0
 
+            #Обучение на корректированных данных
             for data, target in corrected_loader:
                 data, target = data.to(self.device), target.to(self.device)
 
@@ -339,8 +368,9 @@ class HITLTrainingSystem:
 
                 total_loss += loss.item()
 
+            #Обучение на части оригинальных данных (для предотвращения забывания)
             for batch_idx, (data, target) in enumerate(train_loader):
-                if batch_idx > 10:
+                if batch_idx > 10:  #Ограничиваем количество батчей
                     break
 
                 data, target = data.to(self.device), target.to(self.device)
@@ -353,13 +383,16 @@ class HITLTrainingSystem:
 
             print(f"Epoch {epoch + 1}/{epochs}, Loss: {total_loss / len(corrected_loader):.4f}")
 
-    def run_hitl_training(self, train_loader, val_loader, initial_epochs=10, hitl_iterations=3, uncertain_samples_per_iteration=20):
+    def run_hitl_training(self, train_loader, val_loader, initial_epochs=10, hitl_iterations=3, uncertain_samples_per_iteration=20): #Полный цикл обучения с участием человека
+        #Начальное обучение
         initial_accuracy = self.train_initial_model(train_loader, val_loader, initial_epochs)
 
+        #Итерации с участием человека
         for iteration in range(hitl_iterations):
-            print(f"Итерация HITL {iteration + 1}/{hitl_iterations}")
+            print(f"\n Итерация HITL {iteration + 1}/{hitl_iterations}")
             print("-" * 40)
 
+            #Поиск неопределенных образцов
             uncertain_samples = self.find_uncertain_samples(
                 val_loader, uncertain_samples_per_iteration
             )
@@ -367,12 +400,16 @@ class HITLTrainingSystem:
             if not uncertain_samples:
                 break
 
+            #Сохранение неопределенных образцов
             self.save_uncertain_samples(uncertain_samples)
 
+            #Получение обратной связи от человека
             corrected_samples = self.human_feedback_session(uncertain_samples)
 
+            #Дообучение модели
             self.retrain_with_feedback(train_loader, corrected_samples)
 
+            #Оценка улучшения
             new_accuracy = self.evaluate_model(val_loader)
             improvement = new_accuracy - self.training_history['current_accuracy']
 
@@ -381,14 +418,15 @@ class HITLTrainingSystem:
             self.training_history['human_feedback_accuracies'].append(new_accuracy)
 
             print(f"Точность после итерации {iteration + 1}: {new_accuracy:.2f}%")
-            print(f"Улучшение: +{improvement:.2f}%")
+            print(f" Улучшение: +{improvement:.2f}%")
 
+        #Финальная статистика
         self.print_final_statistics()
         self.save_training_log()
 
         return self.training_history
 
-    def print_final_statistics(self):  # Вывод финальной статистики обучения
+    def print_final_statistics(self): #Вывод финальной статистики обучения
         initial_acc = self.training_history['initial_accuracy']
         current_acc = self.training_history['current_accuracy']
         human_improvement = self.training_history['improvement_from_human']
@@ -403,7 +441,7 @@ class HITLTrainingSystem:
             relative_improvement = ((current_acc - initial_acc) / initial_acc) * 100
             print(f"Относительное улучшение: +{relative_improvement:.1f}%")
 
-    def save_training_log(self):  # Сохранение лога обучения
+    def save_training_log(self): #Сохранение лога обучения
         log_data = {
             'timestamp': datetime.now().isoformat(),
             'training_history': self.training_history,
@@ -416,10 +454,10 @@ class HITLTrainingSystem:
         with open(self.log_file, 'w') as f:
             json.dump(log_data, f, indent=2)
 
-    def visualize_training_progress(self):  # Визуализация прогресса обучения
+    def visualize_training_progress(self): #Визуализация прогресса обучения
         plt.figure(figsize=(12, 8))
 
-        # График точности по эпохам
+        #График точности по эпохам
         plt.subplot(2, 2, 1)
         plt.plot(self.training_history['epoch_accuracies'], 'b-', label='Обычное обучение')
         plt.xlabel('Эпоха')
@@ -428,7 +466,7 @@ class HITLTrainingSystem:
         plt.legend()
         plt.grid(True)
 
-        # График улучшений от человека
+        #График улучшений от человека
         plt.subplot(2, 2, 2)
         hitl_accuracies = self.training_history['human_feedback_accuracies']
         if hitl_accuracies:
@@ -439,7 +477,7 @@ class HITLTrainingSystem:
             plt.legend()
             plt.grid(True)
 
-        # Сравнение методов
+        #Сравнение методов
         plt.subplot(2, 2, 3)
         methods = ['Начальная', 'Финальная']
         accuracies = [
@@ -451,7 +489,7 @@ class HITLTrainingSystem:
         plt.title('Сравнение точности')
         plt.ylim(0, 100)
 
-        # Добавление значений на столбцы
+        #Добавление значений на столбцы
         for i, v in enumerate(accuracies):
             plt.text(i, v + 1, f'{v:.1f}%', ha='center')
 
@@ -459,23 +497,71 @@ class HITLTrainingSystem:
         plt.savefig('training_progress.png', dpi=300, bbox_inches='tight')
         plt.show()
 
-def load_custom_dataset(train_dir, test_dir):
-    if not os.path.exists(train_dir):
-        raise FileNotFoundError(f"Директория {train_dir} не найдена!")
-    if not os.path.exists(test_dir):
-        raise FileNotFoundError(f"Директория {test_dir} не найдена!")
 
+def load_custom_dataset(train_dir, test_dir, image_size=(28, 28)): #Загрузка датасетов
+    #Проверка существования директорий
+    if not os.path.exists(train_dir):
+        raise FileNotFoundError(f"Директория {train_dir} не найдена")
+    if not os.path.exists(test_dir):
+        raise FileNotFoundError(f"Директория {test_dir} не найдена")
+
+    class AddGaussianNoise:  # Гауссовский шум
+        def __init__(self, mean=0.0, std=0.1):
+            self.std = std
+            self.mean = mean
+
+        def __call__(self, tensor):
+            return tensor + torch.randn(tensor.size()) * self.std + self.mean
+
+    #Определение transforms
     transform = transforms.Compose([
-        transforms.Resize((14, 14)),  # было (28, 28)
-        transforms.Grayscale(num_output_channels=1),
+        transforms.Resize(image_size), #оригинальный размер 28*28
+        #transforms.Resize((14, 14)), #сжатие до 14*14
+        transforms.Grayscale(num_output_channels=1),  #Преобразование в grayscale
         transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,))
+        #AddGaussianNoise(std=0.13),  # Можно изменить шум
+        transforms.Normalize((0.1307,), (0.3081,))  #Нормализация как в MNIST
     ])
 
+    #Загрузка датасетов
     train_dataset = ImageFolder(root=train_dir, transform=transform)
     test_dataset = ImageFolder(root=test_dir, transform=transform)
 
     return train_dataset, test_dataset
+
+#Проверка структуры датасетов при использовании сторонних
+'''
+def verify_dataset_structure(train_dir, test_dir):
+    #Проверка тренировочной директории
+    train_classes = sorted(os.listdir(train_dir))
+    test_classes = sorted(os.listdir(test_dir))
+
+    #Проверка соответствия классов
+    if train_classes != test_classes:
+        print("Классы в тренировочной и тестовой выборках не совпадают")
+
+    # Подсчет изображений по классам
+    print("Распределение изображений по классам:")
+    print("Класс | Тренировочные | Тестовые")
+
+    for class_name in train_classes:
+        train_class_dir = os.path.join(train_dir, class_name)
+        test_class_dir = os.path.join(test_dir, class_name)
+
+        if os.path.exists(train_class_dir):
+            train_count = len([f for f in os.listdir(train_class_dir)
+                               if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))])
+        else:
+            train_count = 0
+
+        if os.path.exists(test_class_dir):
+            test_count = len([f for f in os.listdir(test_class_dir)
+                              if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))])
+        else:
+            test_count = 0
+
+        print(f"{class_name:>5} | {train_count:>13} | {test_count:>8}")
+'''
 
 def main(): #Основная функция для запуска системы обучения
 
@@ -526,7 +612,7 @@ def main(): #Основная функция для запуска систем�
     training_history = hitl_system.run_hitl_training(
         train_loader=train_loader,
         val_loader=test_loader,
-        initial_epochs=3,
+        initial_epochs=1,
         hitl_iterations=2,
         uncertain_samples_per_iteration=20
     )
