@@ -496,15 +496,15 @@ class HITLTrainingSystem: #Система обучения нейронной с
         plt.savefig('training_progress.png', dpi=300, bbox_inches='tight')
         plt.show()
 
-def load_custom_dataset(train_dir, test_dir, image_size=(28, 28)):
-    def load_custom_dataset(train_dir, test_dir, image_size=(28, 28)):  # Загрузка датасетов
-        # Проверка существования директорий
-        if not os.path.exists(train_dir):
-            raise FileNotFoundError(f"Директория {train_dir} не найдена")
-        if not os.path.exists(test_dir):
-            raise FileNotFoundError(f"Директория {test_dir} не найдена")
 
-    class AddGaussianNoise: #Гауссовский шум
+def load_custom_dataset(train_dir, test_dir, image_size=(28, 28)): #Загрузка датасетов
+    #Проверка существования директорий
+    if not os.path.exists(train_dir):
+        raise FileNotFoundError(f"Директория {train_dir} не найдена")
+    if not os.path.exists(test_dir):
+        raise FileNotFoundError(f"Директория {test_dir} не найдена")
+
+    class AddGaussianNoise:  # Гауссовский шум
         def __init__(self, mean=0.0, std=0.1):
             self.std = std
             self.mean = mean
@@ -512,13 +512,13 @@ def load_custom_dataset(train_dir, test_dir, image_size=(28, 28)):
         def __call__(self, tensor):
             return tensor + torch.randn(tensor.size()) * self.std + self.mean
 
-    # Определение transforms
+    #Определение transforms
     transform = transforms.Compose([
-        transforms.Resize((28, 28)),
-        transforms.Grayscale(num_output_channels=1),
+        transforms.Resize(image_size),
+        transforms.Grayscale(num_output_channels=1),  #Преобразование в grayscale
         transforms.ToTensor(),
-        AddGaussianNoise(std=0.13),  #Можно изменить шум
-        transforms.Normalize((0.1307,), (0.3081,))
+        #AddGaussianNoise(std=0.13),  # Можно изменить шум
+        transforms.Normalize((0.1307,), (0.3081,))  #Нормализация как в MNIST
     ])
 
     #Загрузка датасетов
@@ -526,6 +526,40 @@ def load_custom_dataset(train_dir, test_dir, image_size=(28, 28)):
     test_dataset = ImageFolder(root=test_dir, transform=transform)
 
     return train_dataset, test_dataset
+
+#Проверка структуры датасетов при использовании сторонних
+'''
+def verify_dataset_structure(train_dir, test_dir):
+    #Проверка тренировочной директории
+    train_classes = sorted(os.listdir(train_dir))
+    test_classes = sorted(os.listdir(test_dir))
+
+    #Проверка соответствия классов
+    if train_classes != test_classes:
+        print("Классы в тренировочной и тестовой выборках не совпадают")
+
+    # Подсчет изображений по классам
+    print("Распределение изображений по классам:")
+    print("Класс | Тренировочные | Тестовые")
+
+    for class_name in train_classes:
+        train_class_dir = os.path.join(train_dir, class_name)
+        test_class_dir = os.path.join(test_dir, class_name)
+
+        if os.path.exists(train_class_dir):
+            train_count = len([f for f in os.listdir(train_class_dir)
+                               if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))])
+        else:
+            train_count = 0
+
+        if os.path.exists(test_class_dir):
+            test_count = len([f for f in os.listdir(test_class_dir)
+                              if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))])
+        else:
+            test_count = 0
+
+        print(f"{class_name:>5} | {train_count:>13} | {test_count:>8}")
+'''
 
 def main(): #Основная функция для запуска системы обучения
 
@@ -544,6 +578,11 @@ def main(): #Основная функция для запуска систем�
     train_dir = "Trainingimages"
     test_dir = "Testimages"
 
+    #Проверка структуры датасета (при необходимости)
+    '''
+    verify_dataset_structure(train_dir, test_dir)
+    '''
+
     #Загрузка датасетов
     try:
         train_dataset, test_dataset = load_custom_dataset(train_dir, test_dir)
@@ -551,15 +590,15 @@ def main(): #Основная функция для запуска систем�
     except Exception as e:
         print(f"Ошибка при загрузке датасетов: {e}")
 
-    # Создание DataLoader'ов (для MPS лучше меньше workers)
+    #Создание DataLoader'ов (для MPS лучше меньше workers)
     num_workers = 0 if device.type == 'mps' else 4
     train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, num_workers=num_workers)
     test_loader = DataLoader(test_dataset, batch_size=128, shuffle=False, num_workers=num_workers)
 
-    # Создание модели
+    #Создание модели
     model = CNNClassifier(num_classes=10).to(device)
 
-    # Создание системы обучения с участием человека
+    #Создание системы обучения с участием человека
     hitl_system = HITLTrainingSystem(
         model=model,
         device=device,
@@ -567,7 +606,7 @@ def main(): #Основная функция для запуска систем�
         confidence_threshold=0.8
     )
 
-    # Запуск обучения
+    #Запуск обучения
     training_history = hitl_system.run_hitl_training(
         train_loader=train_loader,
         val_loader=test_loader,
@@ -576,18 +615,18 @@ def main(): #Основная функция для запуска систем�
         uncertain_samples_per_iteration=20
     )
 
-    # Визуализация результатов
+    #Визуализация результатов
     hitl_system.visualize_training_progress()
 
     return training_history
 
 
 if __name__ == "__main__":
-    # Установка seed для воспроизводимости
+    #Установка seed для воспроизводимости
     torch.manual_seed(42)
     np.random.seed(42)
 
-    # Запуск системы
+    #Запуск системы
     history = main()
 
     print("Обучение полностью завершено")
